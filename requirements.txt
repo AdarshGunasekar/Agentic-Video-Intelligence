@@ -1,0 +1,19 @@
+# Core
+fastapi
+uvicorn[standard]
+
+# ML / AI
+ultralytics           # YOLOv8
+insightface           # Face recognition
+onnxruntime           # Needed for InsightFace
+paddleocr             # License plate recognition
+
+
+# Utils
+opencv-python
+numpy
+pillow
+
+langchain
+langchain-community
+ollama

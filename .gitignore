@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual environment
+venv/
+
+# IDE/editor files
+.vscode/
+*.swp
+*.swo
+*.idea/
+
+# OS generated
+.DS_Store
+Thumbs.db
+
+# LangChain/Chroma/Vector DB artifacts
+chroma_store/
+*.sqlite3
+
+# Sensitive files
+.env
+
+# Large JSON mock data
+mock1_events.json
+events.json
