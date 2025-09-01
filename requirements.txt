@@ -17,3 +17,6 @@ pillow
 langchain
 langchain-community
 ollama
+
+neo4j
+python-dotenv

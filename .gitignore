@@ -28,3 +28,6 @@ chroma_store/
 # Large JSON mock data
 mock1_events.json
 events.json
+graph2_events.json
+mock2_events.json
+test_cases.txt
