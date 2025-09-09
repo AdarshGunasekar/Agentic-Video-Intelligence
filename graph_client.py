@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 import os
+import json
 
 load_dotenv()
 
@@ -30,6 +31,12 @@ class GraphClient:
             for c in cyphers:
                 sess.run(c)
 
+    # ---- Wipe the whole graph ----
+    def wipe(self):
+        with self.driver.session() as sess:
+            sess.run("MATCH (n) DETACH DELETE n")
+        print("⚠️ Wiped entire Neo4j database (all nodes + relationships).")
+
     # ---- Ingest events ----
     def ingest_events(self, events: List[Dict[str, Any]]):
         with self.driver.session() as sess:
@@ -51,6 +58,7 @@ class GraphClient:
                 confidence = ai.get("confidence")
                 shirt_color = ai.get("shirt_color")
                 license_plate = ai.get("license_plate")
+                vehicle_color = ai.get("vehicle_color")
 
                 # Upsert Event
                 sess.run("""
@@ -62,7 +70,8 @@ class GraphClient:
                         e.video_time = $video_time,
                         e.confidence = $confidence,
                         e.shirt_color = $shirt_color,
-                        e.license_plate = $license_plate
+                        e.license_plate = $license_plate,
+                        e.vehicle_color = $vehicle_color
                 """, {
                     "event_id": event_id,
                     "timestamp": timestamp,
@@ -71,8 +80,9 @@ class GraphClient:
                     "frame_number": frame_number,
                     "video_time": video_time,
                     "confidence": confidence,
-                    "shirt_color": shirt_color,
-                    "license_plate": license_plate
+                    "shirt_color": shirt_color.lower() if shirt_color else None,
+                    "license_plate": license_plate,
+                    "vehicle_color": vehicle_color.lower() if vehicle_color else None
                 })
 
                 # Camera
@@ -96,12 +106,12 @@ class GraphClient:
                     pid = ev.get("person_id", "UNKNOWN")
                     sess.run("""
                         MERGE (p:Person {person_id: $pid})
-                        SET p.shirt_color = coalesce(p.shirt_color, $shirt_color)
                         MERGE (e:Event {event_id: $event_id})
                         MERGE (p)-[:APPEARED_IN]->(e)
-                    """, {"pid": pid, "event_id": event_id, "shirt_color": shirt_color})
+                    """, {"pid": pid, "event_id": event_id})
                     key = f"P::{pid}"
-                else:
+
+                else:  # Vehicle
                     vid = ev.get("vehicle_id", "UNKNOWN")
                     vtype = ev.get("type")
                     sess.run("""
@@ -110,7 +120,12 @@ class GraphClient:
                             v.license_plate = $license_plate
                         MERGE (e:Event {event_id: $event_id})
                         MERGE (v)-[:APPEARED_IN]->(e)
-                    """, {"vid": vid, "vtype": vtype, "license_plate": license_plate, "event_id": event_id})
+                    """, {
+                        "vid": vid,
+                        "vtype": vtype,
+                        "license_plate": license_plate,
+                        "event_id": event_id
+                    })
                     key = f"V::{vid}"
 
                 # Temporal chain
@@ -124,6 +139,16 @@ class GraphClient:
                         """, {"prev_id": prev, "curr_id": event_id})
                     last_event_by_entity[key] = event_id
 
+    # ---- Load and ingest directly from file ----
+    def ingest_from_file(self, file_path: str, reset: bool = False):
+        with open(file_path, "r") as f:
+            events = json.load(f)
+        if reset:
+            self.wipe()
+        self.ensure_constraints()
+        self.ingest_events(events)
+        print(f"✅ Ingested {len(events)} events from {file_path}")
+
     # ---- Helpers for common queries ----
     def person_trail(self, person_id: str, start: Optional[str] = None, end: Optional[str] = None):
         q = """
@@ -133,7 +158,8 @@ class GraphClient:
           AND ($end   IS NULL OR e.timestamp <= datetime($end))
         RETURN e.event_id AS event_id, toString(e.timestamp) AS ts, l.name AS location,
                c.camera_id AS camera_id, e.video_file AS video_file,
-               e.frame_number AS frame_number, e.video_time AS video_time
+               e.frame_number AS frame_number, e.video_time AS video_time,
+               e.shirt_color AS shirt_color
         ORDER BY e.timestamp
         """
         with self.driver.session() as sess:
@@ -147,11 +173,25 @@ class GraphClient:
           AND ($end   IS NULL OR e.timestamp <= datetime($end))
         RETURN e.event_id AS event_id, toString(e.timestamp) AS ts, l.name AS location,
                c.camera_id AS camera_id, e.video_file AS video_file,
-               e.frame_number AS frame_number, e.video_time AS video_time
+               e.frame_number AS frame_number, e.video_time AS video_time,
+               e.vehicle_color AS vehicle_color
         ORDER BY e.timestamp
         """
         with self.driver.session() as sess:
             return [dict(r) for r in sess.run(q, {"vid": vehicle_id, "start": start, "end": end})]
+
+    # ---- Query red vehicles by color ----
+    def red_vehicles_timestamps(self):
+        """Get timestamps of all red vehicles"""
+        q = """
+        MATCH (v:Vehicle)-[:APPEARED_IN]->(e:Event)
+        WHERE toLower(e.vehicle_color) = 'red'
+        RETURN e.event_id AS event_id, toString(e.timestamp) AS timestamp, 
+               v.vehicle_id AS vehicle_id, e.vehicle_color AS color, e.location AS location
+        ORDER BY e.timestamp
+        """
+        with self.driver.session() as sess:
+            return [dict(r) for r in sess.run(q)]
 
     def run_cypher(self, cypher: str, params: Optional[Dict[str, Any]] = None):
         with self.driver.session() as sess:
