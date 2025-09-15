@@ -1,4 +1,4 @@
-import re
+import re  # noqa: I001
 from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain_community.graphs import Neo4jGraph
@@ -6,6 +6,7 @@ from langchain_community.chains.graph_qa.cypher import GraphCypherQAChain
 from langchain_ollama import OllamaLLM
 from langchain.prompts import PromptTemplate
 import traceback
+from vector_rag import query_vector_db
 
 # ---------- CONFIG ----------
 NEO4J_URI = "neo4j://127.0.0.1:7687"
@@ -117,6 +118,10 @@ RETURN e.event_id, toString(e.timestamp) AS timestamp, e.event_type;
 
 The question is:
 {query}
+
+You are also provided with relevant context:
+{vector_context}
+Use this context to better understand the user's query.
 """
 
 
@@ -144,14 +149,19 @@ QA_TEMPLATE = """Answer the following question based only on the Cypher query re
 
 Question: {question}
 Cypher Results: {context}
+Vector Context: {vector_context}
 Answer:"""
 
 CYPHER_GENERATION_PROMPT = PromptTemplate(
-    input_variables=["schema", "query"], template=CYPHER_GENERATION_TEMPLATE
+    input_variables=["schema", "query","vector_context"], template=CYPHER_GENERATION_TEMPLATE
 )
 
+ANSWER_GENERATION_PROMPT = PromptTemplate(
+    input_variables=["db_result", "query"],
+    template=ANSWER_GENERATION_TEMPLATE,
+)
 
-QA_PROMPT = PromptTemplate(input_variables=["question", "context"], template=QA_TEMPLATE)
+QA_PROMPT = PromptTemplate(input_variables=["question", "context"],partial_variables={"vector_context": ""}, template=QA_TEMPLATE)
 
 # ---------- CHAIN ----------
 cypher_chain = GraphCypherQAChain.from_llm(
@@ -159,7 +169,7 @@ cypher_chain = GraphCypherQAChain.from_llm(
     graph=graph,
     cypher_prompt=CYPHER_GENERATION_PROMPT,
     qa_prompt=QA_PROMPT,
-    ans_prompt=ANSWER_GENERATION_TEMPLATE,
+    ans_prompt=ANSWER_GENERATION_PROMPT,
     verbose=True,
     return_intermediate_steps=True,
     allow_dangerous_requests=True,
@@ -254,13 +264,15 @@ def make_case_insensitive(query: str) -> str:
 # ---------- EXECUTION ----------
 def execute_question(user_query: str):
     try:
+        vector_context = query_vector_db(user_query, k=5)
+        print(vector_context)
         schema = graph.get_schema  # property, not callable in your version
         # print("Schema being injected:\n", schema)
         # print("Prompt preview:\n", CYPHER_GENERATION_PROMPT.format(schema=schema, query="dummy"))
 
         # --- wrap chain call separately ---
         try:
-            response = cypher_chain.invoke({"schema": schema, "query": user_query})
+            response = cypher_chain.invoke({"schema": schema, "query": user_query,"vector_context":vector_context})
             print("DEBUG response:", response)
         except Exception as chain_error:
             print("CHAIN ERROR:", chain_error)

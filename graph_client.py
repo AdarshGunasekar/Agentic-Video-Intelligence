@@ -8,6 +8,7 @@ import json
 
 load_dotenv()
 
+
 class GraphClient:
     def __init__(self):
         uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
@@ -21,16 +22,22 @@ class GraphClient:
     # ---- Constraints for fast MERGE ----
     def ensure_constraints(self):
         cyphers = [
+            # Unique constraints (already exist)
             "CREATE CONSTRAINT IF NOT EXISTS FOR (e:Event) REQUIRE e.event_id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Person) REQUIRE p.person_id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (v:Vehicle) REQUIRE v.vehicle_id IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Camera)  REQUIRE c.camera_id IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (l:Location) REQUIRE l.name IS UNIQUE"
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Camera) REQUIRE c.camera_id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (l:Location) REQUIRE l.name IS UNIQUE",
+
+            # Additional indexes for faster filtering and range queries
+            "CREATE INDEX IF NOT EXISTS FOR (e:Event) ON (e.timestamp)",
+            "CREATE INDEX IF NOT EXISTS FOR (e:Event) ON (e.vehicle_color)",
+            "CREATE INDEX IF NOT EXISTS FOR (e:Event) ON (e.shirt_color)",
         ]
         with self.driver.session() as sess:
             for c in cyphers:
                 sess.run(c)
-
+        print("✅ Constraints and indexes ensured for fast MERGE & queries")
     # ---- Wipe the whole graph ----
     def wipe(self):
         with self.driver.session() as sess:
@@ -44,7 +51,7 @@ class GraphClient:
 
             for ev in events:
                 event_id = ev["event_id"]
-                entity = ev.get("entity")   # "Person" or "Vehicle"
+                entity = ev.get("entity")  # "Person" or "Vehicle"
                 timestamp = ev.get("timestamp")
                 camera_id = ev.get("camera_id")
                 location = ev.get("location")
@@ -59,20 +66,23 @@ class GraphClient:
                 shirt_color = ai.get("shirt_color")
                 license_plate = ai.get("license_plate")
                 vehicle_color = ai.get("vehicle_color")
-
+                description = ev.get("description")
                 # Upsert Event
-                sess.run("""
-                    MERGE (e:Event {event_id: $event_id})
-                    SET e.timestamp = datetime($timestamp),
-                        e.event_type = $event_type,
-                        e.video_file = $video_file,
-                        e.frame_number = $frame_number,
-                        e.video_time = $video_time,
-                        e.confidence = $confidence,
-                        e.shirt_color = $shirt_color,
-                        e.license_plate = $license_plate,
-                        e.vehicle_color = $vehicle_color
-                """, {
+                sess.run(
+                """
+                MERGE (e:Event {event_id: $event_id})
+                SET e.timestamp = datetime($timestamp),
+                    e.event_type = $event_type,
+                    e.video_file = $video_file,
+                    e.frame_number = $frame_number,
+                    e.video_time = $video_time,
+                    e.confidence = $confidence,
+                    e.shirt_color = $shirt_color,
+                    e.license_plate = $license_plate,
+                    e.vehicle_color = $vehicle_color,
+                    e.description = $description
+                """,
+                {
                     "event_id": event_id,
                     "timestamp": timestamp,
                     "event_type": event_type,
@@ -82,61 +92,79 @@ class GraphClient:
                     "confidence": confidence,
                     "shirt_color": shirt_color.lower() if shirt_color else None,
                     "license_plate": license_plate,
-                    "vehicle_color": vehicle_color.lower() if vehicle_color else None
-                })
+                    "vehicle_color": vehicle_color.lower() if vehicle_color else None,
+                    "description": description,
+                },
+                )
+
 
                 # Camera
                 if camera_id:
-                    sess.run("""
+                    sess.run(
+                        """
                         MERGE (c:Camera {camera_id: $camera_id})
                         MERGE (e:Event {event_id: $event_id})
                         MERGE (e)-[:CAPTURED_BY {confidence: $confidence}]->(c)
-                    """, {"camera_id": camera_id, "event_id": event_id, "confidence": confidence})
+                    """,
+                        {"camera_id": camera_id, "event_id": event_id, "confidence": confidence},
+                    )
 
                 # Location
                 if location:
-                    sess.run("""
+                    sess.run(
+                        """
                         MERGE (l:Location {name: $name})
                         MERGE (e:Event {event_id: $event_id})
                         MERGE (e)-[:AT]->(l)
-                    """, {"name": location, "event_id": event_id})
+                    """,
+                        {"name": location, "event_id": event_id},
+                    )
 
                 # Entity (Person or Vehicle)
                 if entity == "Person":
                     pid = ev.get("person_id", "UNKNOWN")
-                    sess.run("""
+                    sess.run(
+                        """
                         MERGE (p:Person {person_id: $pid})
                         MERGE (e:Event {event_id: $event_id})
                         MERGE (p)-[:APPEARED_IN]->(e)
-                    """, {"pid": pid, "event_id": event_id})
+                    """,
+                        {"pid": pid, "event_id": event_id},
+                    )
                     key = f"P::{pid}"
 
                 else:  # Vehicle
                     vid = ev.get("vehicle_id", "UNKNOWN")
                     vtype = ev.get("type")
-                    sess.run("""
+                    sess.run(
+                        """
                         MERGE (v:Vehicle {vehicle_id: $vid})
                         SET v.type = $vtype,
                             v.license_plate = $license_plate
                         MERGE (e:Event {event_id: $event_id})
                         MERGE (v)-[:APPEARED_IN]->(e)
-                    """, {
-                        "vid": vid,
-                        "vtype": vtype,
-                        "license_plate": license_plate,
-                        "event_id": event_id
-                    })
+                    """,
+                        {
+                            "vid": vid,
+                            "vtype": vtype,
+                            "license_plate": license_plate,
+                            "event_id": event_id,
+                        },
+                    )
                     key = f"V::{vid}"
 
                 # Temporal chain
                 if timestamp:
                     prev = last_event_by_entity.get(key)
                     if prev:
-                        sess.run("""
+                        sess.run(
+                            """
                             MATCH (prev:Event {event_id: $prev_id})
                             MATCH (curr:Event {event_id: $curr_id})
                             MERGE (prev)-[:FOLLOWS]->(curr)
-                        """, {"prev_id": prev, "curr_id": event_id})
+                        """,
+                            {"prev_id": prev, "curr_id": event_id},
+                        )
                     last_event_by_entity[key] = event_id
 
     # ---- Load and ingest directly from file ----
@@ -165,7 +193,9 @@ class GraphClient:
         with self.driver.session() as sess:
             return [dict(r) for r in sess.run(q, {"pid": person_id, "start": start, "end": end})]
 
-    def vehicle_trail(self, vehicle_id: str, start: Optional[str] = None, end: Optional[str] = None):
+    def vehicle_trail(
+        self, vehicle_id: str, start: Optional[str] = None, end: Optional[str] = None
+    ):
         q = """
         MATCH (v:Vehicle {vehicle_id: $vid})-[:APPEARED_IN]->(e:Event)-[:AT]->(l:Location)
         OPTIONAL MATCH (e)-[:CAPTURED_BY]->(c:Camera)
